@@ -5,14 +5,16 @@ Checklist:
   ✅ Config từ environment (12-factor)
   ✅ Structured JSON logging
   ✅ API Key authentication
-  ✅ Rate limiting
-  ✅ Cost guard
+  ✅ JWT authentication
+  ✅ Rate limiting (Redis)
+  ✅ Cost guard (Redis)
   ✅ Input validation (Pydantic)
   ✅ Health check + Readiness probe
   ✅ Graceful shutdown
   ✅ Security headers
   ✅ CORS
   ✅ Error handling
+  ✅ Stateless design
 """
 import os
 import time
@@ -20,7 +22,6 @@ import signal
 import logging
 import json
 from datetime import datetime, timezone
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Security, Depends, Request, Response
@@ -30,6 +31,9 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 from app.config import settings
+from app.auth import UserCredentials, TokenResponse, authenticate_user, create_access_token, verify_token, get_current_user
+from app.rate_limiter import check_rate_limit, get_rate_limit_info
+from app.cost_guard import check_and_record_cost, estimate_request_cost, get_budget_status
 
 # Mock LLM (thay bằng OpenAI/Anthropic khi có API key)
 from utils.mock_llm import ask as llm_ask
@@ -47,41 +51,6 @@ START_TIME = time.time()
 _is_ready = False
 _request_count = 0
 _error_count = 0
-
-# ─────────────────────────────────────────────────────────
-# Simple In-memory Rate Limiter
-# ─────────────────────────────────────────────────────────
-_rate_windows: dict[str, deque] = defaultdict(deque)
-
-def check_rate_limit(key: str):
-    now = time.time()
-    window = _rate_windows[key]
-    while window and window[0] < now - 60:
-        window.popleft()
-    if len(window) >= settings.rate_limit_per_minute:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: {settings.rate_limit_per_minute} req/min",
-            headers={"Retry-After": "60"},
-        )
-    window.append(now)
-
-# ─────────────────────────────────────────────────────────
-# Simple Cost Guard
-# ─────────────────────────────────────────────────────────
-_daily_cost = 0.0
-_cost_reset_day = time.strftime("%Y-%m-%d")
-
-def check_and_record_cost(input_tokens: int, output_tokens: int):
-    global _daily_cost, _cost_reset_day
-    today = time.strftime("%Y-%m-%d")
-    if today != _cost_reset_day:
-        _daily_cost = 0.0
-        _cost_reset_day = today
-    if _daily_cost >= settings.daily_budget_usd:
-        raise HTTPException(503, "Daily budget exhausted. Try tomorrow.")
-    cost = (input_tokens / 1000) * 0.00015 + (output_tokens / 1000) * 0.0006
-    _daily_cost += cost
 
 # ─────────────────────────────────────────────────────────
 # Auth
@@ -171,6 +140,8 @@ class AskResponse(BaseModel):
     answer: str
     model: str
     timestamp: str
+    user_id: str
+    tokens_used: int
 
 # ─────────────────────────────────────────────────────────
 # Endpoints
@@ -183,10 +154,54 @@ def root():
         "version": settings.app_version,
         "environment": settings.environment,
         "endpoints": {
-            "ask": "POST /ask (requires X-API-Key)",
+            "auth_token": "POST /auth/token (get JWT token)",
+            "auth_me": "GET /auth/me (current user info)",
+            "ask": "POST /ask (requires JWT Bearer token)",
             "health": "GET /health",
             "ready": "GET /ready",
+            "metrics": "GET /metrics (requires API key)",
         },
+    }
+
+
+@app.post("/auth/token", response_model=TokenResponse, tags=["Authentication"])
+async def login(credentials: UserCredentials):
+    """
+    Get JWT access token for authenticated users.
+
+    **Demo users:**
+    - `student` / `demo123` (user role, 10 req/min)
+    - `teacher` / `teach456` (admin role, 100 req/min)
+    - `admin` / `secret` (admin role, 1000 req/min)
+    """
+    user = authenticate_user(credentials.username, credentials.password)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password"
+        )
+
+    # Create token with 30 minute expiry
+    access_token = create_access_token(
+        data={"sub": user["username"], "role": user["role"]}
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        expires_in=1800,  # 30 minutes
+        user=user["username"],
+        role=user["role"]
+    )
+
+
+@app.get("/auth/me", tags=["Authentication"])
+async def get_current_user_info(user_info: dict = Depends(get_current_user)):
+    """Get current authenticated user information."""
+    return {
+        "user": user_info["username"],
+        "role": user_info["role"],
+        "rate_limit_info": get_rate_limit_info(user_info["username"]),
+        "budget_info": get_budget_status(user_info["username"])
     }
 
 
@@ -194,36 +209,43 @@ def root():
 async def ask_agent(
     body: AskRequest,
     request: Request,
-    _key: str = Depends(verify_api_key),
+    user_info: dict = Depends(get_current_user),
 ):
     """
     Send a question to the AI agent.
 
-    **Authentication:** Include header `X-API-Key: <your-key>`
+    **Authentication:** Include header `Authorization: Bearer <token>`
     """
-    # Rate limit per API key
-    check_rate_limit(_key[:8])  # use first 8 chars as key bucket
+    user_id = user_info["username"]
 
-    # Budget check
-    input_tokens = len(body.question.split()) * 2
-    check_and_record_cost(input_tokens, 0)
+    # Rate limit check
+    check_rate_limit(request, user_id)
+
+    # Estimate and check cost
+    estimated_cost = estimate_request_cost(body.question)
+    check_and_record_cost(user_id, estimated_cost)
 
     logger.info(json.dumps({
         "event": "agent_call",
+        "user_id": user_id,
         "q_len": len(body.question),
+        "estimated_cost": round(estimated_cost, 6),
         "client": str(request.client.host) if request.client else "unknown",
     }))
 
     answer = llm_ask(body.question)
 
-    output_tokens = len(answer.split()) * 2
-    check_and_record_cost(0, output_tokens)
+    # Record actual cost (mock for now)
+    actual_cost = estimate_request_cost(body.question, len(answer))
+    check_and_record_cost(user_id, actual_cost - estimated_cost)  # Adjust for difference
 
     return AskResponse(
         question=body.question,
         answer=answer,
         model=settings.llm_model,
         timestamp=datetime.now(timezone.utc).isoformat(),
+        user_id=user_id,
+        tokens_used=len(body.question.split()) + len(answer.split())
     )
 
 
@@ -258,9 +280,10 @@ def metrics(_key: str = Depends(verify_api_key)):
         "uptime_seconds": round(time.time() - START_TIME, 1),
         "total_requests": _request_count,
         "error_count": _error_count,
-        "daily_cost_usd": round(_daily_cost, 4),
-        "daily_budget_usd": settings.daily_budget_usd,
-        "budget_used_pct": round(_daily_cost / settings.daily_budget_usd * 100, 1),
+        "environment": settings.environment,
+        "redis_connected": bool(settings.redis_url),
+        "rate_limit_per_minute": settings.rate_limit_per_minute,
+        "monthly_budget_usd": settings.daily_budget_usd * 30,
     }
 
 

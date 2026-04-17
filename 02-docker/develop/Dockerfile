@@ -24,7 +24,7 @@ RUN mkdir -p utils
 COPY utils/mock_llm.py utils/
 
 # Bước 7: Expose port để documentation (không bắt buộc)
-EXPOSE 8000
+EXPOSE 8010
 
 # Bước 8: Command mặc định khi container start
 CMD ["python", "app.py"]

@@ -49,6 +49,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "app:app",
         host="localhost",   # ❌ chỉ chạy được trên local
-        port=8000,          # ❌ cứng port
+        port=8010,          # ❌ cứng port
         reload=True         # ❌ debug reload trong production
     )
