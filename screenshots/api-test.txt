@@ -1,0 +1,18 @@
+# API Test Response Screenshot
+
+Terminal output showing:
+```
+$ curl -X POST https://feisty-serenity-production-b58d.up.railway.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Hello"}'
+
+{"question":"Hello","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận.","platform":"Railway"}
+```
+
+Status: 200 OK
+Response includes:
+- Original question
+- AI-generated answer
+- Platform identifier
+
+[Actual screenshot would show terminal with this API response]

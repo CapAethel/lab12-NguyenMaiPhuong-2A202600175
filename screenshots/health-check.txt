@@ -1,0 +1,12 @@
+# Health Check Response Screenshot
+
+Terminal output showing:
+```
+$ curl https://feisty-serenity-production-b58d.up.railway.app/health
+{"status":"ok","uptime_seconds":5596.6,"platform":"Railway","timestamp":"2026-04-17T10:38:57.348655+00:00"}
+```
+
+Status: 200 OK
+Response time: < 1 second
+
+[Actual screenshot would show terminal with this output]
