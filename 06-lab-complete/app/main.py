@@ -114,7 +114,8 @@ async def request_middleware(request: Request, call_next):
         # Security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers.pop("server", None)
+        if "server" in response.headers:
+            del response.headers["server"]
         duration = round((time.time() - start) * 1000, 1)
         logger.info(json.dumps({
             "event": "request",
@@ -250,7 +251,7 @@ async def ask_agent(
 
 
 @app.get("/health", tags=["Operations"])
-def health():
+async def health():
     """Liveness probe. Platform restarts container if this fails."""
     status = "ok"
     checks = {"llm": "mock" if not settings.openai_api_key else "openai"}
@@ -266,7 +267,7 @@ def health():
 
 
 @app.get("/ready", tags=["Operations"])
-def ready():
+async def ready():
     """Readiness probe. Load balancer stops routing here if not ready."""
     if not _is_ready:
         raise HTTPException(503, "Not ready")

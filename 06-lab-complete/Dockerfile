@@ -18,5 +18,6 @@ RUN chown -R agent:agent /app
 USER agent
 
 ENV PYTHONPATH=/app
+ENV CACHE_BUST=3
 
-CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
+CMD ["python", "app/main.py"]
